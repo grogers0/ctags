@@ -11,6 +11,7 @@ SOURCES = \
 	args.c \
 	ant.c \
 	asm.c \
+	asn.c \
 	asp.c \
 	awk.c \
 	basic.c \
@@ -73,6 +74,7 @@ OBJECTS = \
 	args.$(OBJEXT) \
 	ant.$(OBJEXT) \
 	asm.$(OBJEXT) \
+	asn.$(OBJEXT) \
 	asp.$(OBJEXT) \
 	awk.$(OBJEXT) \
 	basic.$(OBJEXT) \
