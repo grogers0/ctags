@@ -134,6 +134,7 @@ typedef enum eTokenType {
 	TOKEN_PAREN_OPEN,
 	TOKEN_PAREN_CLOSE,
 	TOKEN_ASSIGNMENT,
+	TOKEN_SEMICOLON,
 	TOKEN_KEYWORD,
 	TOKEN_UPPER_IDENTIFIER,
 	TOKEN_LOWER_IDENTIFIER
@@ -156,6 +157,7 @@ static langType Lang_asn;
 static jmp_buf Exception;
 
 static vString *modulereference;
+static vString *identifier;
 
 typedef enum {
 	/* K_CLASS, */ K_ENUMERATOR, K_MEMBER, K_MODULE, K_TYPE, K_VALUE
@@ -364,7 +366,8 @@ static void readToken(tokenInfo *const token)
 
 	token->type		= TOKEN_NONE;
 	token->keyword	= KEYWORD_NONE;
-	vStringClear (token->string);
+	vStringClear(token->string);
+	vStringClear(token->scope);
 
 getNextChar:
 	do
@@ -382,6 +385,7 @@ getNextChar:
 		case '}': token->type = TOKEN_BRACE_CLOSE;		break;
 		case '(': token->type = TOKEN_PAREN_OPEN;		break;
 		case ')': token->type = TOKEN_PAREN_CLOSE;		break;
+		case ';': token->type = TOKEN_SEMICOLON;		break;
 		case ':':
 			{
 				int d1 = fileGetc();
@@ -461,27 +465,50 @@ getNextChar:
 	}
 }
 
-void skipToToken(tokenInfo *const token, tokenType type)
+static void skipPastToken(tokenInfo *const token, tokenType type)
 {
-	do
-	{
+	while (!isType(token, type))
 		readToken(token);
-	}
-	while (!isType(token, type));
+
+	readToken(token);
 }
 
-void skipToKeyword(tokenInfo *const token, keywordId keyword)
+static void skipPastNestedToken(tokenInfo *const token, tokenType openType,
+		tokenType closeType)
 {
+	int nesting = 0;
+
 	do
 	{
+		if (isType(token, openType))
+			++nesting;
+		else if (isType(token, closeType))
+			--nesting;
+
 		readToken(token);
 	}
-	while (!isKeyword(token, keyword));
+	while (nesting > 0);
 }
 
-void addScopeQualifier(vString *const string)
+static void skipPastKeyword(tokenInfo *const token, keywordId keyword)
+{
+	while (!isKeyword(token, keyword))
+		readToken(token);
+
+	readToken(token);
+}
+
+static void addScopeQualifier(vString *const string)
 {
 	vStringCatS(string, ".");
+}
+
+static void addToScope(tokenInfo *const token, const vString *const string)
+{
+	if (vStringLength(token->scope) > 0)
+		addScopeQualifier(token->scope);
+
+	vStringCat(token->scope, string);
 }
 
 static void makeAsnTag(const tokenInfo *const token, const asnKind kind)
@@ -526,34 +553,306 @@ static void makeAsnTag(const tokenInfo *const token, const asnKind kind)
 	}
 }
 
-void parseModuleDefinition(tokenInfo *const token)
+static void parseExports(tokenInfo *const token)
 {
-	readToken(token);
-	if (!isType(token, TOKEN_UPPER_IDENTIFIER))
+	if (!isKeyword(token, KEYWORD_EXPORTS))
 		return;
+
+	skipPastToken(token, TOKEN_SEMICOLON);
+}
+
+static void parseImports(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_IMPORTS))
+		return;
+
+	skipPastToken(token, TOKEN_SEMICOLON);
+}
+
+static boolean parseBitStringType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_BIT))
+		return FALSE;
+
+	readToken(token);
+	if (!isKeyword(token, KEYWORD_STRING))
+		return FALSE;
+
+	readToken(token);
+	if (isType(token, TOKEN_BRACE_OPEN)) /* NamedBitList - FIXME */
+		skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+
+	return TRUE;
+}
+
+static boolean parseBooleanType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_BOOLEAN))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseCharacterStringType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseChoiceType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseEmbeddedPDVType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static void parseEnumerations(tokenInfo *const token)
+{
+	/* FIXME */
+}
+
+static boolean parseEnumeratedType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_ENUMERATED))
+		return FALSE;
+
+	readToken(token);
+	if (isType(token, TOKEN_BRACE_OPEN))
+		skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+	/*
+	readToken(token);
+	if (!isToken(token, TOKEN_BRACE_OPEN))
+		return FALSE;
+
+	readToken(token);
+	parseEnumerations(token);
+
+	readToken(token);
+	if (!isToken(token, TOKEN_BRACE_CLOSE))
+		return FALSE;
+		*/
+
+	return TRUE;
+}
+
+static boolean parseExternalType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseInstanceOfType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseIntegerType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_INTEGER))
+		return FALSE;
+
+	readToken(token);
+	if (isType(token, TOKEN_BRACE_OPEN)) /* NamedNumberList - FIXME */
+		skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+
+	return TRUE;
+}
+
+static boolean parseNullType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_NULL))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseObjectClassFieldType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseObjectIdentifierType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseOctetStringType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_OCTET))
+		return FALSE;
+
+	readToken(token);
+	if (!isKeyword(token, KEYWORD_STRING))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseRealType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_REAL))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseRelativeOIDType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseSequenceType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseSequenceOfType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseSetType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseSetOfType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseTaggedType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseBuiltinType(tokenInfo *const token)
+{
+	return parseBitStringType(token) || parseBooleanType(token) ||
+		parseCharacterStringType(token) || parseChoiceType(token) ||
+		parseEmbeddedPDVType(token) || parseEnumeratedType(token) ||
+		parseExternalType(token) || parseInstanceOfType(token) ||
+		parseIntegerType(token) || parseIntegerType(token) ||
+		parseNullType(token) || parseObjectClassFieldType(token) ||
+		parseObjectIdentifierType(token) || parseOctetStringType(token) ||
+		parseRealType(token) || parseRelativeOIDType(token) ||
+		parseSequenceType(token) || parseSequenceOfType(token) ||
+		parseSetType(token) || parseSetOfType(token) || parseTaggedType(token);
+}
+
+static boolean parseReferencedType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME */
+}
+
+static boolean parseConstraint(tokenInfo *const token)
+{
+	boolean ret = FALSE;
+	while (isType(token, TOKEN_PAREN_OPEN))
+	{
+		ret = TRUE;
+		skipPastNestedToken(token, TOKEN_PAREN_OPEN, TOKEN_PAREN_CLOSE);
+	}
+	return ret;
+}
+
+static boolean parseSizeConstraint(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_SIZE))
+		return FALSE;
+
+	readToken(token);
+	return parseConstraint(token);
+}
+
+static void parseType(tokenInfo *const token)
+{
+	parseBuiltinType(token) || parseReferencedType(token);
+	parseConstraint(token);
+}
+
+static boolean parseTypeAssignment(tokenInfo *const token)
+{
+	if (!isType(token, TOKEN_UPPER_IDENTIFIER))
+		return FALSE;
+
+	addToScope(token, modulereference);
+	makeAsnTag(token, K_TYPE);
+
+	vStringCopy(identifier, token->string);
+
+	readToken(token);
+	if (!isType(token, TOKEN_ASSIGNMENT))
+		return FALSE;
+
+	readToken(token);
+	parseType(token);
+
+	return TRUE;
+}
+
+static boolean parseValueAssignment(tokenInfo *const token)
+{
+	if (!isType(token, TOKEN_LOWER_IDENTIFIER))
+		return FALSE;
+
+	return FALSE; /* FIXME */
+}
+
+static boolean parseAssignment(tokenInfo *const token)
+{
+	/* FIXME handle more than TypeAssignment and ValueAssignment */
+	return parseTypeAssignment(token) || parseValueAssignment(token);
+}
+
+static void parseAssignmentList(tokenInfo *const token)
+{
+	while (parseAssignment(token)) {}
+}
+
+static void parseModuleBody(tokenInfo *const token)
+{
+	parseExports(token);
+	parseImports(token);
+	parseAssignmentList(token);
+}
+
+static boolean parseModuleDefinition(tokenInfo *const token)
+{
+	if (!isType(token, TOKEN_UPPER_IDENTIFIER))
+		return FALSE;
 
 	makeAsnTag(token, K_MODULE);
 
 	vStringCopy(modulereference, token->string);
 
-	skipToKeyword(token, KEYWORD_DEFINITIONS); /* skip DefinitiveIdentifier */
-	skipToToken(token, TOKEN_ASSIGNMENT); /* skip TagDefault ExtensionDefault */
+	readToken(token);
+	skipPastKeyword(token, KEYWORD_DEFINITIONS); /* skip DefinitiveIdentifier */
+	skipPastToken(token, TOKEN_ASSIGNMENT); /* skip TagDefault,ExtensionDefault */
+
+	if (!isKeyword(token, KEYWORD_BEGIN))
+		return FALSE;
 
 	readToken(token);
-	if (!isKeyword(token, KEYWORD_BEGIN))
-		return;
+	parseModuleBody(token);
 
-	/* parse ModuleBody */
+	if (!isKeyword(token, KEYWORD_END))
+		return FALSE;
 
-	skipToKeyword(token, KEYWORD_END);
+	readToken(token);
+
+	return TRUE;
 }
 
 static void parseAsnFile(tokenInfo *const token)
 {
-	while (TRUE)
-	{
-		parseModuleDefinition(token);
-	}
+	readToken(token);
+	while (parseModuleDefinition(token)) {}
 }
 
 static void findAsnTags(void)
@@ -562,12 +861,14 @@ static void findAsnTags(void)
 	tokenInfo *const token = newToken();
 
 	modulereference = vStringNew();
+	identifier = vStringNew();
 
 	exception = (exception_t) (setjmp(Exception));
 	if (exception == ExceptionNone)
 		parseAsnFile(token);
 
 	vStringDelete(modulereference);
+	vStringDelete(identifier);
 
 	deleteToken(token);
 }
