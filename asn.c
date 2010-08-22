@@ -15,6 +15,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <setjmp.h>
+#include <stdarg.h>
 
 #include "debug.h"
 #include "entry.h"
@@ -35,7 +36,12 @@
  *	 DATA DECLARATIONS
  */
 
-typedef enum eException { ExceptionNone, ExceptionEOF } exception_t;
+typedef enum eException
+{
+	ExceptionNone,
+	ExceptionEOF,
+	ExceptionParseError
+} exception_t;
 
 /*	Used to specify type of keyword. */
 typedef enum eKeywordId {
@@ -133,8 +139,12 @@ typedef enum eTokenType {
 	TOKEN_BRACE_CLOSE,
 	TOKEN_PAREN_OPEN,
 	TOKEN_PAREN_CLOSE,
+	TOKEN_ANGLE_BRACKET_OPEN,
+	TOKEN_ANGLE_BRACKET_CLOSE,
 	TOKEN_ASSIGNMENT,
 	TOKEN_SEMICOLON,
+	TOKEN_PIPE,
+	TOKEN_PERIOD,
 	TOKEN_KEYWORD,
 	TOKEN_UPPER_IDENTIFIER,
 	TOKEN_LOWER_IDENTIFIER
@@ -260,9 +270,25 @@ static const keywordDesc AsnKeywordTable[] = {
  *	 FUNCTION DEFINITIONS
  */
 
+static void parseType(tokenInfo *const token);
+
 static boolean isnewline(const int c)
 {
 	return c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+static boolean isKeywordAnyOf(const tokenInfo *const token, ...)
+{
+	va_list ap;
+	boolean ret = FALSE;
+	keywordId keyword;
+
+	va_start(ap, token);
+	while ((keyword = va_arg(ap, keywordId)) != KEYWORD_NONE)
+		ret = ret || isKeyword(token, keyword);
+
+	va_end(ap);
+	return ret;
 }
 
 static tokenInfo *newToken(void)
@@ -380,12 +406,16 @@ getNextChar:
 
 	switch (c)
 	{
-		case EOF: longjmp(Exception, ExceptionEOF);		break;
-		case '{': token->type = TOKEN_BRACE_OPEN;		break;
-		case '}': token->type = TOKEN_BRACE_CLOSE;		break;
-		case '(': token->type = TOKEN_PAREN_OPEN;		break;
-		case ')': token->type = TOKEN_PAREN_CLOSE;		break;
-		case ';': token->type = TOKEN_SEMICOLON;		break;
+		case EOF: longjmp(Exception, ExceptionEOF);			break;
+		case '{': token->type = TOKEN_BRACE_OPEN;			break;
+		case '}': token->type = TOKEN_BRACE_CLOSE;			break;
+		case '(': token->type = TOKEN_PAREN_OPEN;			break;
+		case ')': token->type = TOKEN_PAREN_CLOSE;			break;
+		case '<': token->type = TOKEN_ANGLE_BRACKET_OPEN;	break;
+		case '>': token->type = TOKEN_ANGLE_BRACKET_CLOSE;	break;
+		case ';': token->type = TOKEN_SEMICOLON;			break;
+		case '|': token->type = TOKEN_PIPE;					break;
+		case '.': token->type = TOKEN_PERIOD;				break;
 		case ':':
 			{
 				int d1 = fileGetc();
@@ -569,6 +599,32 @@ static void parseImports(tokenInfo *const token)
 	skipPastToken(token, TOKEN_SEMICOLON);
 }
 
+static boolean parseConstraint(tokenInfo *const token)
+{
+	if (!isType(token, TOKEN_PAREN_OPEN))
+		return FALSE;
+
+	skipPastNestedToken(token, TOKEN_PAREN_OPEN, TOKEN_PAREN_CLOSE);
+	return TRUE;
+}
+
+static boolean parseSizeConstraint(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_SIZE))
+		return FALSE;
+
+	readToken(token);
+	if (!parseConstraint(token))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:(, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	return TRUE;
+}
+
 static boolean parseBitStringType(tokenInfo *const token)
 {
 	if (!isKeyword(token, KEYWORD_BIT))
@@ -576,7 +632,12 @@ static boolean parseBitStringType(tokenInfo *const token)
 
 	readToken(token);
 	if (!isKeyword(token, KEYWORD_STRING))
-		return FALSE;
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:STRING, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
 
 	readToken(token);
 	if (isType(token, TOKEN_BRACE_OPEN)) /* NamedBitList - FIXME */
@@ -594,19 +655,72 @@ static boolean parseBooleanType(tokenInfo *const token)
 	return TRUE;
 }
 
+static boolean parseRestrictedCharacterStringType(tokenInfo *const token)
+{
+	if (!isKeywordAnyOf(token, KEYWORD_BMPString, KEYWORD_GeneralString,
+				KEYWORD_GraphicString, KEYWORD_IA5String, KEYWORD_ISO646String,
+				KEYWORD_NumericString, KEYWORD_PrintableString,
+				KEYWORD_TeletexString, KEYWORD_T61String,
+				KEYWORD_UniversalString, KEYWORD_UTF8String,
+				KEYWORD_VideotexString, KEYWORD_VisibleString, KEYWORD_NONE))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseUnrestrictedCharacterStringType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_CHARACTER))
+		return FALSE;
+
+	readToken(token);
+	if (!isKeyword(token, KEYWORD_STRING))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:STRING, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	readToken(token);
+	return TRUE;
+}
+
 static boolean parseCharacterStringType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	return parseUnrestrictedCharacterStringType(token) ||
+		parseRestrictedCharacterStringType(token);
 }
 
 static boolean parseChoiceType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_CHOICE))
+		return FALSE;
+
+	readToken(token);
+	if (isType(token, TOKEN_BRACE_OPEN))
+		skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+
+	return TRUE;
 }
 
 static boolean parseEmbeddedPDVType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_EMBEDDED))
+		return FALSE;
+
+	readToken(token);
+	if (!isKeyword(token, KEYWORD_PDV))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:PDV, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	readToken(token);
+	return TRUE;
 }
 
 static void parseEnumerations(tokenInfo *const token)
@@ -640,12 +754,16 @@ static boolean parseEnumeratedType(tokenInfo *const token)
 
 static boolean parseExternalType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_EXTERNAL))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
 }
 
 static boolean parseInstanceOfType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	return FALSE; /* FIXME X.681 */
 }
 
 static boolean parseIntegerType(tokenInfo *const token)
@@ -671,12 +789,25 @@ static boolean parseNullType(tokenInfo *const token)
 
 static boolean parseObjectClassFieldType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	return FALSE; /* FIXME X.681 */
 }
 
 static boolean parseObjectIdentifierType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_OBJECT))
+		return FALSE;
+
+	readToken(token);
+	if (!isKeyword(token, KEYWORD_IDENTIFIER))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:IDENTIFIER, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	readToken(token);
+	return TRUE;
 }
 
 static boolean parseOctetStringType(tokenInfo *const token)
@@ -686,7 +817,12 @@ static boolean parseOctetStringType(tokenInfo *const token)
 
 	readToken(token);
 	if (!isKeyword(token, KEYWORD_STRING))
-		return FALSE;
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:STRING, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
 
 	readToken(token);
 	return TRUE;
@@ -703,32 +839,125 @@ static boolean parseRealType(tokenInfo *const token)
 
 static boolean parseRelativeOIDType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_RELATIVE_OID))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
 }
 
 static boolean parseSequenceType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isType(token, TOKEN_BRACE_OPEN))
+		return FALSE;
+
+	/* FIXME */
+	skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+	return TRUE;
 }
 
 static boolean parseSequenceOfType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_OF))
+		return FALSE;
+
+	/* FIXME parse NamedType - there is an ambiguity that needs 2 tokens of
+	 * lookahead (SelectionType also starts with an identifier)
+	 */
+	readToken(token);
+	parseType(token);
+	return TRUE;
+}
+
+static boolean parseConstrainedSequenceOfType(tokenInfo *const token)
+{
+	if (!parseSizeConstraint(token) && !parseConstraint(token))
+		return FALSE;
+
+	return parseSequenceOfType(token);
+}
+
+static boolean parseSequenceXxxType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_SEQUENCE))
+		return FALSE;
+
+	readToken(token);
+	if (!parseSequenceType(token) && !parseConstrainedSequenceOfType(token) &&
+			!parseSequenceOfType(token))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected either:{, OF, (, SIZE, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	return TRUE;
 }
 
 static boolean parseSetType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isType(token, TOKEN_BRACE_OPEN))
+		return FALSE;
+
+	/* FIXME */
+	skipPastNestedToken(token, TOKEN_BRACE_OPEN, TOKEN_BRACE_CLOSE);
+	return TRUE;
 }
 
 static boolean parseSetOfType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isKeyword(token, KEYWORD_OF))
+		return FALSE;
+
+	/* FIXME parse NamedType - there is an ambiguity that needs 2 tokens of
+	 * lookahead (SelectionType also starts with an identifier)
+	 */
+	readToken(token);
+	parseType(token);
+	return TRUE;
+}
+
+static boolean parseConstrainedSetOfType(tokenInfo *const token)
+{
+	if (!parseSizeConstraint(token) && !parseConstraint(token))
+		return FALSE;
+
+	return parseSetOfType(token);
+}
+
+static boolean parseSetXxxType(tokenInfo *const token)
+{
+	if (!isKeyword(token, KEYWORD_SET))
+		return FALSE;
+
+	readToken(token);
+	if (!parseSetType(token) && !parseConstrainedSetOfType(token) &&
+			!parseSetOfType(token))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected either:{, OF, (, SIZE, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	return TRUE;
 }
 
 static boolean parseTaggedType(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
+	if (!isType(token, TOKEN_PIPE))
+		return FALSE;
+
+	readToken(token);
+	skipPastToken(token, TOKEN_PIPE); /* skip Class ClassNumber */
+
+	if (isKeyword(token, KEYWORD_IMPLICIT) ||
+			isKeyword(token, KEYWORD_EXPLICIT))
+		readToken(token);
+
+	parseType(token);
+	return TRUE;
 }
 
 static boolean parseBuiltinType(tokenInfo *const token)
@@ -741,38 +970,107 @@ static boolean parseBuiltinType(tokenInfo *const token)
 		parseNullType(token) || parseObjectClassFieldType(token) ||
 		parseObjectIdentifierType(token) || parseOctetStringType(token) ||
 		parseRealType(token) || parseRelativeOIDType(token) ||
-		parseSequenceType(token) || parseSequenceOfType(token) ||
-		parseSetType(token) || parseSetOfType(token) || parseTaggedType(token);
+		parseSequenceXxxType(token) || parseSetXxxType(token) ||
+		parseTaggedType(token);
 }
 
-static boolean parseReferencedType(tokenInfo *const token)
+static boolean parseExternalTypeReferenceOrTypereference(tokenInfo *const token)
 {
-	return FALSE; /* FIXME */
-}
-
-static boolean parseConstraint(tokenInfo *const token)
-{
-	boolean ret = FALSE;
-	while (isType(token, TOKEN_PAREN_OPEN))
-	{
-		ret = TRUE;
-		skipPastNestedToken(token, TOKEN_PAREN_OPEN, TOKEN_PAREN_CLOSE);
-	}
-	return ret;
-}
-
-static boolean parseSizeConstraint(tokenInfo *const token)
-{
-	if (!isKeyword(token, KEYWORD_SIZE))
+	if (!isType(token, TOKEN_UPPER_IDENTIFIER))
 		return FALSE;
 
 	readToken(token);
-	return parseConstraint(token);
+	if (isType(token, TOKEN_PERIOD))
+	{
+		readToken(token);
+		if (!isType(token, TOKEN_UPPER_IDENTIFIER))
+		{
+			DebugStatement(debugPrintf(DEBUG_PARSE,
+						"\n Parse Error in %s, expected typereference, got:%s\n",
+						__FUNCTION__, vStringValue(token->string)));
+			longjmp(Exception, ExceptionParseError);
+		}
+
+		readToken(token);
+	}
+
+	return TRUE;
+}
+
+static boolean parseParameterizedType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME X.684 */
+}
+
+static boolean parseParameterizedValueSetType(tokenInfo *const token)
+{
+	return FALSE; /* FIXME X.684 */
+}
+
+
+static boolean parseDefinedType(tokenInfo *const token)
+{
+	return parseExternalTypeReferenceOrTypereference(token) ||
+		parseParameterizedType(token) || parseParameterizedValueSetType(token);
+}
+
+static boolean parseUsefulType(tokenInfo *const token)
+{
+	if (!isKeywordAnyOf(token, KEYWORD_GeneralizedTime, KEYWORD_UTCTime,
+			KEYWORD_ObjectDescriptor, KEYWORD_NONE))
+		return FALSE;
+
+	readToken(token);
+	return TRUE;
+}
+
+static boolean parseSelectionType(tokenInfo *const token)
+{
+	if (!isType(token, TOKEN_LOWER_IDENTIFIER))
+		return FALSE;
+
+	readToken(token);
+	if (!isType(token, TOKEN_ANGLE_BRACKET_OPEN))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:{, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
+	readToken(token);
+	parseType(token);
+	return TRUE;
+}
+
+static boolean parseTypeFromObject(tokenInfo *const token)
+{
+	return FALSE; /* FIXME X.681 */
+}
+
+static boolean parseValueSetFromObjects(tokenInfo *const token)
+{
+	return FALSE; /* FIXME X.681 */
+}
+
+
+static boolean parseReferencedType(tokenInfo *const token)
+{
+	return parseDefinedType(token) || parseUsefulType(token) ||
+		parseSelectionType(token) || parseTypeFromObject(token) ||
+		parseValueSetFromObjects(token);
 }
 
 static void parseType(tokenInfo *const token)
 {
-	parseBuiltinType(token) || parseReferencedType(token);
+	if (!parseBuiltinType(token) && !parseReferencedType(token))
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected to parse a type, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
+
 	parseConstraint(token);
 }
 
@@ -836,13 +1134,23 @@ static boolean parseModuleDefinition(tokenInfo *const token)
 	skipPastToken(token, TOKEN_ASSIGNMENT); /* skip TagDefault,ExtensionDefault */
 
 	if (!isKeyword(token, KEYWORD_BEGIN))
-		return FALSE;
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:BEGIN, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
 
 	readToken(token);
 	parseModuleBody(token);
 
 	if (!isKeyword(token, KEYWORD_END))
-		return FALSE;
+	{
+		DebugStatement(debugPrintf(DEBUG_PARSE,
+					"\n Parse Error in %s, expected:END, got:%s\n",
+					__FUNCTION__, vStringValue(token->string)));
+		longjmp(Exception, ExceptionParseError);
+	}
 
 	readToken(token);
 
